@@ -7,15 +7,15 @@
     python3 broker_position_scraper.py
 
 操作步骤:
-    1. 运行脚本后会自动打开浏览器
-    2. 在浏览器中登录交易可查账号
-    3. 登录成功后回到终端按 Enter 键
-    4. 等待数据获取完成，自动生成HTML报告
+    1. 首次运行会打开浏览器让你登录
+    2. 登录成功后按 Enter 键
+    3. 之后运行会自动使用保存的登录状态，无需重复登录
 """
 
 import asyncio
 import json
 import re
+import os
 from datetime import datetime
 from playwright.async_api import async_playwright
 import pandas as pd
@@ -26,6 +26,7 @@ class BrokerPositionScraper:
     
     BASE_URL = "https://www.jiaoyikecha.com"
     TARGET_BROKERS = ["乾坤期货", "摩根大通", "国泰君安", "中信期货"]
+    AUTH_FILE = "auth_state.json"  # 保存登录状态的文件
     
     def __init__(self):
         self.position_data = []
@@ -51,29 +52,76 @@ class BrokerPositionScraper:
     async def _scrape_data(self):
         """爬取数据"""
         async with async_playwright() as p:
+            # 检查是否有保存的登录状态
+            has_auth = os.path.exists(self.AUTH_FILE)
+            
             browser = await p.chromium.launch(
-                headless=False,
-                slow_mo=100
+                headless=has_auth,  # 有登录状态时使用无头模式
+                slow_mo=50 if not has_auth else 0
             )
-            context = await browser.new_context(
-                viewport={"width": 1400, "height": 900},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-            )
+            
+            # 如果有保存的登录状态，加载它
+            if has_auth:
+                print("\n[1/4] 使用已保存的登录状态...")
+                context = await browser.new_context(
+                    storage_state=self.AUTH_FILE,
+                    viewport={"width": 1400, "height": 900},
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                )
+            else:
+                context = await browser.new_context(
+                    viewport={"width": 1400, "height": 900},
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                )
+                
             page = await context.new_page()
             page.set_default_timeout(120000)
             
             page.on("response", lambda r: asyncio.create_task(self._handle_response(r)))
             
             try:
-                print("\n[1/4] 打开网站...")
+                print("\n[1/4] 打开网站..." if has_auth else "\n[1/4] 打开网站...")
                 await page.goto(self.BASE_URL, wait_until="domcontentloaded")
                 await asyncio.sleep(3)
                 
-                print("\n" + "=" * 70)
-                print("🔐 请在浏览器窗口中登录您的账号")
-                print("   登录完成后，回到终端按 Enter 键继续...")
-                print("=" * 70)
-                input()
+                # 检查是否需要登录
+                need_login = not has_auth
+                if has_auth:
+                    # 验证登录状态是否有效
+                    is_logged_in = await page.evaluate('''() => {
+                        return document.body.innerText.includes('退出') || 
+                               document.body.innerText.includes('个人中心') ||
+                               document.querySelector('.user-info') !== null;
+                    }''')
+                    if not is_logged_in:
+                        print("   ⚠️ 登录状态已过期，需要重新登录")
+                        need_login = True
+                        # 删除过期的登录状态
+                        os.remove(self.AUTH_FILE)
+                        await browser.close()
+                        # 重新打开浏览器（非无头模式）
+                        browser = await p.chromium.launch(headless=False, slow_mo=50)
+                        context = await browser.new_context(
+                            viewport={"width": 1400, "height": 900},
+                            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+                        )
+                        page = await context.new_page()
+                        page.set_default_timeout(120000)
+                        page.on("response", lambda r: asyncio.create_task(self._handle_response(r)))
+                        await page.goto(self.BASE_URL, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                
+                if need_login:
+                    print("\n" + "=" * 70)
+                    print("🔐 请在浏览器窗口中登录您的账号")
+                    print("   登录完成后，回到终端按 Enter 键继续...")
+                    print("   (登录状态会被保存，下次无需重复登录)")
+                    print("=" * 70)
+                    input()
+                    
+                    # 保存登录状态
+                    await context.storage_state(path=self.AUTH_FILE)
+                    print("   ✓ 登录状态已保存")
                 
                 print("\n[2/4] 验证登录状态...")
                 await asyncio.sleep(2)
@@ -100,6 +148,10 @@ class BrokerPositionScraper:
                         
             except Exception as e:
                 print(f"❌ 出错: {e}")
+                # 如果出错可能是登录状态问题，删除保存的状态
+                if os.path.exists(self.AUTH_FILE):
+                    os.remove(self.AUTH_FILE)
+                    print("   已清除登录状态，请重新运行")
             finally:
                 await browser.close()
                 

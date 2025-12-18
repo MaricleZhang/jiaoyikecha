@@ -35,7 +35,9 @@ ENV/
 *.xlsx
 *.xls
 *.csv
-*.json
+
+# Auth state (contains login cookies)
+auth_state.json
 
 # Environment variables
 .env
